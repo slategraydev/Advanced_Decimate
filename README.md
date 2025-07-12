@@ -27,9 +27,9 @@ More features and user facing controls will be added in the future.
 
 1.  Download the `Advanced_Decimate.py` file from this repository.
 2.  In Blender, go to `Edit > Preferences > Add-ons`.
-3.  Click the **Install...** button at the top-right.
+3.  Click the small downward facing arrow at the top-right and select **Install from Disk...**.
 4.  Navigate to and select the `Advanced_Decimate.py` file.
-5.  Enable the addon by checking the box next to **"Object: Advanced Decimate"**.
+5.  Enable/Disable the addon by checking the box next to **"Advanced Decimate"**.
 
 ## How to Use
 
