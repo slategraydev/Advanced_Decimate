@@ -39,142 +39,63 @@ bl_info = {
 # ============================================================
 #  CORE FUNCTIONS
 # ============================================================
-def manage_uv_seams(obj, mark_seams=True, original_seams=None):
+def manage_uv_seams(obj, mark_seams=True):
     """
-    Identifies edges on UV island boundaries by checking for UV splits on vertices.
-    It is non-destructive to pre-existing seams.
-    TODO:
-    - It currently marks every edge on a UV seam as a seam.
-    - This still works, but it would save some computation time if it worked as intended.
-    - This could also be done on a copy of the object instead of trying to preserve the original.
+    Identifies and marks UV seams on a given object.
+    Turns out that Blender has a built-in operator to generate seams from UV islands.
     """
-    # Set the active object to the source object.
+    # Set the active object to the target object.
     bpy.context.view_layer.objects.active = obj
 
-    # Ensure Blender is in object mode before switching to edit mode.
+    # Ensure Blender is still in object mode before switching to edit mode.
     if bpy.context.object.mode == 'EDIT':
         bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.mode_set(mode='EDIT')
 
-    # Get the BMesh of the object.
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.verts.ensure_lookup_table()
-    bm.edges.ensure_lookup_table()
-    
-    # Get the active UV layer.
-    uv_layer = bm.loops.layers.uv.active
-    if not uv_layer:
+    # The operator works on the active UV map, so exit if it doesn't exist.
+    if not obj.data.uv_layers.active:
         print("INFO: No active UV layer found. Skipping seam marking.")
-        bpy.ops.object.mode_set(mode='OBJECT')
-        return set() if mark_seams else None
+        return
 
-    # To outline the seams mark the edges on the UV island borders.
+    # Mark the edges on the UV island borders to outline the seams.
     if mark_seams:
-        print("INFO: Marking UV island borders as temporary seams.")
-        original_seams = {e.index for e in bm.edges if e.seam}
-
-        # Commenting this out until the seam marking is more accurate.
-        # print(f"INFO: Stored {len(original_seams)} pre-existing seams.")
-        
-        marked_count = 0
-        for edge in bm.edges:
-            # I *think* an edge would be on a UV seam if its vertices have different UV coordinates.
-            # But, this is currently marking every edge as a seam.
-            if not edge.is_boundary:
-                vert_uvs = {}
-                for loop in edge.link_loops:
-                    vert_uvs.setdefault(loop.vert.index, []).append(loop[uv_layer].uv)
-
-                is_seam = False
-                for uvs in vert_uvs.values():
-                    # If a vertex has more than one distinct UV coordinate, it's a split.
-                    if len(uvs) > 1:
-                        first_uv = uvs[0]
-                        for i in range(1, len(uvs)):
-                            if (first_uv - uvs[i]).length > 1e-5:
-                                is_seam = True
-                                break
-                    if is_seam:
-                        break
-                
-                if is_seam:
-                    if not edge.seam:
-                        marked_count += 1
-                    edge.seam = True
-        
-        print(f"INFO: Marked {marked_count} new edges as seams.")
-        bmesh.update_edit_mesh(obj.data)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.seams_from_islands()
         bpy.ops.object.mode_set(mode='OBJECT')
-        return original_seams
 
-    # If unmarking seams, remove the temporary marked seams.
-    else:
-        print("INFO: Removing temporary seams from the source mesh.")
-        if original_seams is None:
-            bpy.ops.object.mode_set(mode='OBJECT')
-            return None
-        
-        removed_count = 0
-        for edge in bm.edges:
-            # Only remove the seam if it was newly marked by this script.
-            # Honestly, it might be better to just remove all seams.
-            # While this will preserve the original seams they will be wonky.
-            # Keeping this in for now.
-            if edge.seam and edge.index not in original_seams:
-                edge.seam = False
-                removed_count += 1
-
-        # Commenting this out until the seam marking is more accurate.
-        # print(f"INFO: Removed {removed_count} temporary seams.")
-        bmesh.update_edit_mesh(obj.data)
-        bpy.ops.object.mode_set(mode='OBJECT')
-        return None
-
-def get_decimation_mapping_kdtree(source_obj, decimate_ratio):
+def get_decimation_mapping_kdtree(source_obj_to_decimate, decimate_ratio):
     """
-    Get a precise vertex mapping using a KDTree for an exact nearest-neighbor search.
-    With this, each vertex on the new mesh will be mapped to the single closest vertex from the original mesh.
-    This will help data transfer be more accurate.
+    Get a precise vertex mapping using a KDTree and decimate the provided object directly.
+    This function is destructive to the object passed in.
     """
-    # Create a temporary mesh by copying the source.
-    # Create a temporary object to hold the mesh data.
-    temp_mesh = source_obj.data.copy()
-    temp_mesh.name = "temp_decimate_mesh"
-    temp_obj = bpy.data.objects.new("temp_decimate_obj", temp_mesh)
-    bpy.context.collection.objects.link(temp_obj)
-    
-    # Remove shape keys from the temporary object.
-    # This prevents the decimate modifier from getting confused.
-    if temp_obj.data.shape_keys:
-        temp_obj.shape_key_clear()
+    # Build a KDTree from the object's vertex positions before it gets decimated.
+    # This allows us to map the new vertices back to the original vertex indices.
+    source_vertex_count = len(source_obj_to_decimate.data.vertices)
+    kdtree = mathutils.kdtree.KDTree(source_vertex_count)
+    for i, v in enumerate(source_obj_to_decimate.data.vertices):
+        kdtree.insert(v.co, i)
+    kdtree.balance()
 
-    # Decimate the temporary mesh, preserving the previously marked seams.
-    bpy.context.view_layer.objects.active = temp_obj
+    # Decimate the object directly. This is safe because it's already a copy.
+    bpy.context.view_layer.objects.active = source_obj_to_decimate
     print("INFO: Decimating mesh while preserving UV island borders.")
-    mod = temp_obj.modifiers.new(name="Decimate", type='DECIMATE')
+
+    # The decimate modifier can be confused by shape keys, so we clear them from the copy.
+    if source_obj_to_decimate.data.shape_keys:
+        source_obj_to_decimate.shape_key_clear()
+
+    mod = source_obj_to_decimate.modifiers.new(name="Decimate", type='DECIMATE')
     mod.ratio = decimate_ratio
     mod.delimit = {'SEAM'}
     bpy.ops.object.modifier_apply(modifier=mod.name)
 
-    # Create a new mesh from the decimated temporary object.
-    decimated_mesh = temp_obj.data.copy()
-    decimated_mesh.name = "decimated_mesh_final"
-
-    # Use the original source mesh to build a KDTree for fast spatial lookups.
-    source_vertex_count = len(source_obj.data.vertices)
-    kdtree = mathutils.kdtree.KDTree(source_vertex_count)
-    for i, v in enumerate(source_obj.data.vertices):
-        kdtree.insert(v.co, i)
-    kdtree.balance()
-
-    # Map each decimated vertex to its closest original vertex.
+    # Map each new vertex to its closest original vertex using the KDTree.
     vertex_mapping = {}
-    for i, v_dec in enumerate(decimated_mesh.vertices):
+    for i, v_dec in enumerate(source_obj_to_decimate.data.vertices):
         co, index, dist = kdtree.find(v_dec.co)
         vertex_mapping[i] = index
 
-    bpy.data.objects.remove(temp_obj, do_unlink=True)
-    return vertex_mapping, decimated_mesh
+    return vertex_mapping, source_obj_to_decimate
 
 def apply_decimation_mapping_to_shape_key(shape_key_verts, vertex_mapping):
     """
@@ -193,14 +114,15 @@ def apply_decimation_mapping_to_shape_key(shape_key_verts, vertex_mapping):
     
     return decimated_verts
 
-def create_final_object_with_mapping(source_obj, shape_key_geometry, key_names, vertex_mapping, decimated_mesh, shape_key_values):
+def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, key_names, vertex_mapping, shape_key_values):
     """
-    Create the final object and apply all data using the decimation mapping.
+    Rebuilds all the data (shape keys, materials, etc.) onto the final object
+    using the decimation mapping and data from the source object.
     TODO:
     - Add adjustable user settings for the data transfer modifiers.
     """
-    final_obj = bpy.data.objects.new(source_obj.name + "_Decimated", decimated_mesh)
-    bpy.context.collection.objects.link(final_obj)
+    # Rename the decimated object to be more descriptive.
+    final_obj.name = source_obj.name + "_Decimated"
     
     # Ran into some projection issues, need to align the new object to the source object.
     final_obj.matrix_world = source_obj.matrix_world
@@ -246,15 +168,13 @@ def create_final_object_with_mapping(source_obj, shape_key_geometry, key_names, 
     bpy.ops.object.datalayout_transfer(modifier=vg_data_transfer_mod.name)
     bpy.ops.object.modifier_apply(modifier=vg_data_transfer_mod.name)
   
-    # Transfer the marked seams.
-    print("INFO: Transferring marked seams for UV island borders.")
-    seam_transfer_mod = final_obj.modifiers.new(name="SeamTransfer", type='DATA_TRANSFER')
-    seam_transfer_mod.object = source_obj
-    seam_transfer_mod.use_edge_data = True
-    seam_transfer_mod.data_types_edges = {'SEAM'}
-    seam_transfer_mod.edge_mapping = 'NEAREST'
-    bpy.ops.object.datalayout_transfer(modifier=seam_transfer_mod.name)
-    bpy.ops.object.modifier_apply(modifier=seam_transfer_mod.name)
+    # Clear all seams from the final mesh as they will not line up with the new topology.
+    print("INFO: Clearing all seams from the decimated mesh.")
+    bpy.context.view_layer.objects.active = final_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.mark_seam(clear=True)
+    bpy.ops.object.mode_set(mode='OBJECT')
   
     # Transfer the custom normals.
     print("INFO: Transferring custom normals.")
@@ -342,6 +262,10 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
 
     def execute(self, context):
         start_time = time.time()
+
+        # Ensure we are in Object Mode before proceeding, as many operators require it.
+        if context.object and context.object.mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
         
         decimate_ratio = context.scene.adv_decimate_ratio
         
@@ -350,18 +274,25 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
             self.report({'ERROR'}, "Please select a valid mesh object.")
             return {'CANCELLED'}
 
-        # Apply the transforms to the source object.
-        print("INFO: Applying the transforms to the source object.")
+        # Ensure the original object is the only one selected to avoid duplicating others.
+        bpy.ops.object.select_all(action='DESELECT')
         bpy.context.view_layer.objects.active = source_obj
         source_obj.select_set(True)
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
-        # Store original visibility to restore it later.
-        was_hidden = source_obj.hide_get()
+        # Create a full, unlinked duplicate of the source object to work on.
+        # This is a more robust way to copy, ensuring no data links are shared.
+        print("INFO: Creating a temporary duplicate of the source object.")
+        bpy.ops.object.duplicate(linked=False)
+        source_copy_obj = context.active_object
+        source_copy_obj.name = source_obj.name + "_temp_copy"
+
+        # Apply the transforms to the duplicated object.
+        print("INFO: Applying the transforms to the source object copy.")
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         
-        # Mark the seams on the source object so they can be preserved during decimation.
-        print("INFO: Marking the seams on the source object.")
-        original_seams = manage_uv_seams(source_obj, mark_seams=True)
+        # Mark the seams on the duplicated object so they can be preserved during decimation.
+        print("INFO: Marking the seams on the source object copy.")
+        manage_uv_seams(source_copy_obj, mark_seams=True)
         
         shape_keys = source_obj.data.shape_keys
         shape_key_geometry = {}
@@ -369,7 +300,7 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
         shape_key_values = {}
 
         if shape_keys:
-            print("INFO: Reading all shape key geometry.")
+            print("INFO: Reading all shape key geometry from the original object.")
             key_names = [key.name for key in shape_keys.key_blocks]
             
             # Directly read the absolute vertex coordinates from each shape key block.
@@ -381,33 +312,18 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
                 coords = np.empty(vertex_count * 3, dtype=np.float32)
                 key_block.data.foreach_get('co', coords)
                 shape_key_geometry[name] = coords.reshape(-1, 3)
-
-            for key in shape_keys.key_blocks:
-                key.value = 0.0
         else:
             print("INFO: No shape keys found on the selected object. Proceeding without shape key data.")
 
-        print("INFO: Performing the decimation.")
-        vertex_mapping, decimated_mesh = get_decimation_mapping_kdtree(source_obj, decimate_ratio)
-        print(f"INFO: Decimation complete! Mapped {len(source_obj.data.vertices)} source vertices to {len(decimated_mesh.vertices)} decimated vertices.")
-
-        # Need to clean up the temporary seams from the source object,
-        # so that only the original seams are transferred.
-        print("INFO: Restoring the original seams on the source object before data transfer.")
-        manage_uv_seams(source_obj, mark_seams=False, original_seams=original_seams)
+        print("INFO: Performing the decimation on the duplicated object.")
+        # The KDTree is built from the duplicated object, which has transformations applied,
+        # ensuring the vertex mapping is correct.
+        vertex_mapping, decimated_obj = get_decimation_mapping_kdtree(source_copy_obj, decimate_ratio)
+        print(f"INFO: Decimation complete! Mapped {len(source_copy_obj.data.vertices)} source vertices to {len(decimated_obj.data.vertices)} decimated vertices.")
 
         print("INFO: Assembling the final object.")
-        final_obj = create_final_object_with_mapping(source_obj, shape_key_geometry, key_names, vertex_mapping, decimated_mesh, shape_key_values)
+        final_obj = rebuild_data_on_decimated_object(source_obj, decimated_obj, shape_key_geometry, key_names, vertex_mapping, shape_key_values)
 
-        # Restore original shape key values on the source object.
-        print("INFO: Restoring the original object state.")
-        if source_obj.data.shape_keys:
-            print("INFO: Restoring the shape key values.")
-            source_keys = source_obj.data.shape_keys.key_blocks
-            for name, value in shape_key_values.items():
-                if name in source_keys:
-                    source_keys[name].value = value
-        
         # Finalize the script.
         print(f"INFO: Advanced decimation complete in {time.time() - start_time:.2f} seconds!")
         self.report({'INFO'}, f"Generated: '{final_obj.name}'")
