@@ -1,7 +1,7 @@
 # ============================================================
 #  Advanced Decimate for Blender
 #  Author: Slategray
-#  Version: 1.1 | Release Date: 2025-07-26
+#  Version: 1.1.1 | Release Date: 2025-07-26
 # ------------------------------------------------------------
 #  Description:
 #      A one-click Blender script for mesh decimation
@@ -179,6 +179,9 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
     
     # Ran into some projection issues, need to align the new object to the source object.
     final_obj.matrix_world = source_obj.matrix_world
+    
+    # Set origin to 0,0,0, avoids issues with transforms.
+    final_obj.location = (0, 0, 0)  
 
     # Recreate shape keys using the precise mapping.
     if key_names:
@@ -324,7 +327,6 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
         source_copy_obj = context.active_object
         source_copy_obj.name = source_obj.name + "_temp_copy"
         source_copy_obj.modifiers.clear()
-        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         
         # Mark the seams on the duplicated object so they can be preserved during decimation.
         manage_uv_seams(source_copy_obj, mark_seams=True)
@@ -432,7 +434,5 @@ if __name__ == "__main__":
         del bpy.types.Scene.adv_decimate_ratio
     if hasattr(bpy.types.Scene, 'adv_decimate_iterative'):
         del bpy.types.Scene.adv_decimate_iterative
-    if hasattr(bpy.types.Scene, 'adv_decimate_use_shrinkwrap'):
-        del bpy.types.Scene.adv_decimate_use_shrinkwrap
 
     register()
