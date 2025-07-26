@@ -1,7 +1,7 @@
 # ============================================================
 #  Advanced Decimate for Blender
 #  Author: Slategray
-#  Version: 1.0 | Release Date: 2025-07-12
+#  Version: 1.1 | Release Date: 2025-07-26
 # ------------------------------------------------------------
 #  Description:
 #      A one-click Blender script for mesh decimation
@@ -27,7 +27,7 @@ import bmesh
 bl_info = {
     "name": "Advanced Decimate",
     "author": "Slategray",
-    "version": (1, 0),
+    "version": (1, 1),
     "blender": (2, 80, 0),
     "location": "View3D > Sidebar > Tool",
     "description": "Decimates a mesh while preserving shape keys, UVs, vertex groups, and other data.",
@@ -42,18 +42,14 @@ bl_info = {
 def manage_uv_seams(obj, mark_seams=True):
     """
     Identifies and marks UV seams on a given object.
-    Turns out that Blender has a built-in operator to generate seams from UV islands.
     """
-    # Set the active object to the target object.
     bpy.context.view_layer.objects.active = obj
 
-    # Ensure Blender is still in object mode before switching to edit mode.
     if bpy.context.object.mode == 'EDIT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
     # The operator works on the active UV map, so exit if it doesn't exist.
     if not obj.data.uv_layers.active:
-        print("INFO: No active UV layer found. Skipping seam marking.")
         return
 
     # Mark the edges on the UV island borders to outline the seams.
@@ -63,10 +59,10 @@ def manage_uv_seams(obj, mark_seams=True):
         bpy.ops.uv.seams_from_islands()
         bpy.ops.object.mode_set(mode='OBJECT')
 
-def get_decimation_mapping_kdtree(source_obj_to_decimate, decimate_ratio):
+def get_decimation_mapping_kdtree(source_obj_to_decimate, decimate_ratio, use_iterative=False):
     """
-    Get a precise vertex mapping using a KDTree and decimate the provided object directly.
-    This function is destructive to the object passed in.
+    Get a precise vertex mapping using a KDTree and decimate the provided object.
+    If iterative decimation is enabled, the object will be decimated gradually.
     """
     # Build a KDTree from the object's vertex positions before it gets decimated.
     # This allows us to map the new vertices back to the original vertex indices.
@@ -76,18 +72,75 @@ def get_decimation_mapping_kdtree(source_obj_to_decimate, decimate_ratio):
         kdtree.insert(v.co, i)
     kdtree.balance()
 
-    # Decimate the object directly. This is safe because it's already a copy.
-    bpy.context.view_layer.objects.active = source_obj_to_decimate
-    print("INFO: Decimating mesh while preserving UV island borders.")
-
-    # The decimate modifier can be confused by shape keys, so we clear them from the copy.
+    # Need to clear the shape keys from the temporary object.
     if source_obj_to_decimate.data.shape_keys:
         source_obj_to_decimate.shape_key_clear()
 
-    mod = source_obj_to_decimate.modifiers.new(name="Decimate", type='DECIMATE')
-    mod.ratio = decimate_ratio
-    mod.delimit = {'SEAM'}
-    bpy.ops.object.modifier_apply(modifier=mod.name)
+    if use_iterative:
+        # For iterative decimation, create a reference object to snap the vertices back to.
+        # This prevents the vertices from drifting away from the original surface over all the iterations.
+        bpy.ops.object.select_all(action='DESELECT')
+        bpy.context.view_layer.objects.active = source_obj_to_decimate
+        source_obj_to_decimate.select_set(True)
+        bpy.ops.object.duplicate(linked=False)
+        reference_obj = bpy.context.active_object
+        reference_obj.name = source_obj_to_decimate.name + "_reference"
+        reference_obj.hide_set(True)
+        
+        # Ensure we are operating on the correct object after duplication.
+        bpy.context.view_layer.objects.active = source_obj_to_decimate
+
+        # Get the initial polygon count to use as a baseline for gradual decimation.
+        initial_poly_count = len(source_obj_to_decimate.data.polygons)
+        if initial_poly_count == 0:
+            bpy.data.objects.remove(reference_obj, do_unlink=True)
+            return {}, source_obj_to_decimate
+
+        # Gradually decimate the object in small steps for higher quality results.
+        target_poly_count = int(initial_poly_count * decimate_ratio)
+        current_poly_count = initial_poly_count
+        step = 0.01 
+
+        while current_poly_count > target_poly_count:
+            # Calculate the number of polygons to aim for in the next step.
+            polys_to_remove = int(initial_poly_count * step)
+            next_target_poly_count = current_poly_count - polys_to_remove
+
+            # Ensure we don't go below the final target.
+            if next_target_poly_count < target_poly_count:
+                next_target_poly_count = target_poly_count
+            
+            # The modifier's ratio is relative to the current mesh state.
+            if current_poly_count > 0:
+                modifier_ratio = next_target_poly_count / current_poly_count
+            else:
+                modifier_ratio = 0
+
+            # Apply the decimation modifier.
+            bpy.context.view_layer.objects.active = source_obj_to_decimate
+            mod = source_obj_to_decimate.modifiers.new(name="Decimate", type='DECIMATE')
+            mod.ratio = modifier_ratio
+            mod.delimit = {'SEAM'}
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+
+            # After each decimation step, snap the vertices back to the original surface.
+            shrinkwrap_mod = source_obj_to_decimate.modifiers.new(name="Shrinkwrap", type='SHRINKWRAP')
+            shrinkwrap_mod.target = reference_obj
+            shrinkwrap_mod.wrap_method = 'NEAREST_SURFACEPOINT'
+            bpy.ops.object.modifier_apply(modifier=shrinkwrap_mod.name)
+
+            # Update the current polygon count for the next iteration.
+            current_poly_count = len(source_obj_to_decimate.data.polygons)
+        
+        # Clean up the reference object, we don't need it anymore.
+        bpy.data.objects.remove(reference_obj, do_unlink=True)
+    else:
+        # Perform a single, direct decimation.
+        bpy.context.view_layer.objects.active = source_obj_to_decimate
+        mod = source_obj_to_decimate.modifiers.new(name="Decimate", type='DECIMATE')
+        mod.ratio = decimate_ratio
+        mod.delimit = {'SEAM'}
+        bpy.ops.object.modifier_apply(modifier=mod.name)
 
     # Map each new vertex to its closest original vertex using the KDTree.
     vertex_mapping = {}
@@ -129,8 +182,6 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
 
     # Recreate shape keys using the precise mapping.
     if key_names:
-        print("INFO: Recreating the shape keys.")
-        # For each shape key, create a new shape key and apply the decimation mapping.
         for i, name in enumerate(key_names):
             shape_key_verts = shape_key_geometry[name]
             new_key = final_obj.shape_key_add(name=name, from_mix=(i == 0)) 
@@ -141,7 +192,6 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
                 new_key.data.foreach_set('co', decimated_verts.ravel())
                 
         # Restore the original shape key values.
-        print("INFO: Restoring the shape key values.")
         if final_obj.data.shape_keys:
             final_keys = final_obj.data.shape_keys.key_blocks
             for name, value in shape_key_values.items():
@@ -149,15 +199,12 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
                     final_keys[name].value = value
     
     # Start the data transfer process.
-    print("INFO: Transferring the data from the source mesh.")
-    
     # I think the Data Transfer modifier needs the source object to be visible.
     source_obj.hide_set(False)
     bpy.context.view_layer.objects.active = final_obj
     final_obj.select_set(True)
 
     # Transfer the vertex groups.
-    print("INFO: Transferring the vertex groups.")
     vg_data_transfer_mod = final_obj.modifiers.new(name="VGroupTransfer", type='DATA_TRANSFER')
     vg_data_transfer_mod.object = source_obj
     vg_data_transfer_mod.use_vert_data = True
@@ -169,7 +216,6 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
     bpy.ops.object.modifier_apply(modifier=vg_data_transfer_mod.name)
   
     # Clear all seams from the final mesh as they will not line up with the new topology.
-    print("INFO: Clearing all seams from the decimated mesh.")
     bpy.context.view_layer.objects.active = final_obj
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
@@ -177,7 +223,6 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
     bpy.ops.object.mode_set(mode='OBJECT')
   
     # Transfer the custom normals.
-    print("INFO: Transferring custom normals.")
     cn_data_transfer_mod = final_obj.modifiers.new(name="NormalTransfer", type='DATA_TRANSFER')
     cn_data_transfer_mod.object = source_obj
     cn_data_transfer_mod.use_loop_data = True
@@ -188,13 +233,11 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
     bpy.ops.object.mode_set(mode='OBJECT')
 
     # Link the materials from the source object.
-    print("INFO: Linking the materials from the source object.")
     bpy.context.view_layer.objects.active = source_obj
     bpy.ops.object.make_links_data(type='MATERIAL')
     bpy.context.view_layer.objects.active = final_obj
 
     # Transfer the material assignments.
-    print("INFO: Transferring the material assignments.")
     source_bm = bmesh.new()
     source_bm.from_mesh(source_obj.data)
     source_bm.transform(source_obj.matrix_world) 
@@ -227,15 +270,12 @@ def rebuild_data_on_decimated_object(source_obj, final_obj, shape_key_geometry, 
     target_bm.free()
 
     # Set the parent and transforms.
-    print("INFO: Setting the parent and transforms.")
     if source_obj.parent:
         final_obj.parent = source_obj.parent
         final_obj.parent_type = source_obj.parent_type
-    # The world matrix was already set, but parenting could have altered it.
     final_obj.matrix_world = source_obj.matrix_world
 
     # Recreate the armature modifier if it exists.
-    print("INFO: Recreating the armature modifier.")
     for mod in source_obj.modifiers:
         if mod.type == 'ARMATURE' and mod.object:
             armature_mod = final_obj.modifiers.new(name=mod.name, type='ARMATURE')
@@ -263,11 +303,11 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
     def execute(self, context):
         start_time = time.time()
 
-        # Ensure we are in Object Mode before proceeding, as many operators require it.
         if context.object and context.object.mode == 'EDIT':
             bpy.ops.object.mode_set(mode='OBJECT')
         
         decimate_ratio = context.scene.adv_decimate_ratio
+        use_iterative = context.scene.adv_decimate_iterative
         
         source_obj = bpy.context.active_object
         if source_obj is None or source_obj.type != 'MESH':
@@ -280,18 +320,13 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
         source_obj.select_set(True)
 
         # Create a full, unlinked duplicate of the source object to work on.
-        # This is a more robust way to copy, ensuring no data links are shared.
-        print("INFO: Creating a temporary duplicate of the source object.")
         bpy.ops.object.duplicate(linked=False)
         source_copy_obj = context.active_object
         source_copy_obj.name = source_obj.name + "_temp_copy"
-
-        # Apply the transforms to the duplicated object.
-        print("INFO: Applying the transforms to the source object copy.")
+        source_copy_obj.modifiers.clear()
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         
         # Mark the seams on the duplicated object so they can be preserved during decimation.
-        print("INFO: Marking the seams on the source object copy.")
         manage_uv_seams(source_copy_obj, mark_seams=True)
         
         shape_keys = source_obj.data.shape_keys
@@ -300,13 +335,11 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
         shape_key_values = {}
 
         if shape_keys:
-            print("INFO: Reading all shape key geometry from the original object.")
             key_names = [key.name for key in shape_keys.key_blocks]
             
             # Directly read the absolute vertex coordinates from each shape key block.
             for key_block in source_obj.data.shape_keys.key_blocks:
                 name = key_block.name
-                # Store the current value of the shape key.
                 shape_key_values[name] = key_block.value
                 vertex_count = len(key_block.data)
                 coords = np.empty(vertex_count * 3, dtype=np.float32)
@@ -316,15 +349,12 @@ class OBJECT_OT_advanced_decimate(bpy.types.Operator):
             print("INFO: No shape keys found on the selected object. Proceeding without shape key data.")
 
         print("INFO: Performing the decimation on the duplicated object.")
-        # The KDTree is built from the duplicated object, which has transformations applied,
-        # ensuring the vertex mapping is correct.
-        vertex_mapping, decimated_obj = get_decimation_mapping_kdtree(source_copy_obj, decimate_ratio)
+        # The KDTree is built from the duplicated object with the transforms applied.
+        vertex_mapping, decimated_obj = get_decimation_mapping_kdtree(source_copy_obj, decimate_ratio, use_iterative)
         print(f"INFO: Decimation complete! Mapped {len(source_copy_obj.data.vertices)} source vertices to {len(decimated_obj.data.vertices)} decimated vertices.")
 
-        print("INFO: Assembling the final object.")
         final_obj = rebuild_data_on_decimated_object(source_obj, decimated_obj, shape_key_geometry, key_names, vertex_mapping, shape_key_values)
 
-        # Finalize the script.
         print(f"INFO: Advanced decimation complete in {time.time() - start_time:.2f} seconds!")
         self.report({'INFO'}, f"Generated: '{final_obj.name}'")
         source_obj.hide_set(True)
@@ -349,6 +379,7 @@ class VIEW3D_PT_advanced_decimate(bpy.types.Panel):
 
         layout.label(text="Decimation Ratio:")
         layout.prop(scene, "adv_decimate_ratio", text="")
+        layout.prop(scene, "adv_decimate_iterative")
 
         op = layout.operator("object.advanced_decimate", text="Run Decimation")
 
@@ -371,15 +402,21 @@ def register():
         max=1.0,
         subtype='FACTOR'
     )
+    bpy.types.Scene.adv_decimate_iterative = bpy.props.BoolProperty(
+        name="Iterative Decimate",
+        description="Gradually decimates the mesh for higher quality results. Can be slower.",
+        default=False,
+    )
 
 def unregister():
     # Unregister in reverse order to respect dependencies.
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
             
-    # Also, ensure the scene property exists before trying to delete it.
     if hasattr(bpy.types.Scene, 'adv_decimate_ratio'):
         del bpy.types.Scene.adv_decimate_ratio
+    if hasattr(bpy.types.Scene, 'adv_decimate_iterative'):
+        del bpy.types.Scene.adv_decimate_iterative
 
 # ============================================================
 #  MAIN
@@ -388,12 +425,14 @@ if __name__ == "__main__":
     # For my own sanity, I'm unregistering any existing classes first.
     # This allows for re-running the script from the Text Editor.
     for cls in classes:
-        # Check bpy.types for a class with the same name.
         if hasattr(bpy.types, cls.__name__):
             bpy.utils.unregister_class(getattr(bpy.types, cls.__name__))
             
-    # Unregister the property.
     if hasattr(bpy.types.Scene, 'adv_decimate_ratio'):
         del bpy.types.Scene.adv_decimate_ratio
+    if hasattr(bpy.types.Scene, 'adv_decimate_iterative'):
+        del bpy.types.Scene.adv_decimate_iterative
+    if hasattr(bpy.types.Scene, 'adv_decimate_use_shrinkwrap'):
+        del bpy.types.Scene.adv_decimate_use_shrinkwrap
 
     register()
