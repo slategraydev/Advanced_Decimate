@@ -403,8 +403,8 @@ def register():
         subtype='FACTOR'
     )
     bpy.types.Scene.adv_decimate_iterative = bpy.props.BoolProperty(
-        name="Iterative Decimate",
-        description="Gradually decimates the mesh for higher quality results. Can be slower.",
+        name="Iterative Decimate (Slow)",
+        description="Gradually decimates the mesh for higher quality results in lower poly meshes.",
         default=False,
     )
 
